@@ -2,8 +2,8 @@
     Atarazia UI Library
     Design: supplied GUI-to-Lua export.
     API: NH-style Window -> Page -> SubPage -> Section.
-    No HTTP downloads, external modules, or executor APIs are required.
-    Optional executor file APIs enable named configuration files.
+    Main-window-only edition: no desktop backdrop, sidebar, or auxiliary widgets.
+    ProggyClean is cached when the host supports custom font assets.
 ]]
 
 local Players = game:GetService("Players")
@@ -29,9 +29,11 @@ local Library = {
     MenuKeybind = tostring(Enum.KeyCode.RightShift),
     Directory = "Atarazia",
     Folders = { Assets = "/Assets", Configs = "/Configs" },
-    Font = Font.new("rbxasset://fonts/families/Zekton.json"),
-    FontSize = 12,
-    Animation = { Time = 0.15, Style = "Quint", Direction = "Out" },
+    Font = Font.new("rbxasset://fonts/families/RobotoMono.json"),
+    FontName = "ProggyClean",
+    FontStatus = "Fallback",
+    FontSize = 13,
+    Animation = { Time = 0.18, Style = "Quint", Direction = "Out" },
     Theme = {
         Background = Color3.fromRGB(34, 37, 40),
         Section = Color3.fromRGB(31, 34, 37),
@@ -56,7 +58,6 @@ local Library = {
     Panels = {},
     Keybinds = {},
     LayoutRegistry = {},
-    SettingsWidgets = {},
     WindowVisibilityBindings = {},
     VisibilityOwners = {},
     WindowOpenState = true,
@@ -226,7 +227,7 @@ Library.Create = function(Self, Class, Properties)
         Object.FontFace = Library.Font
         Object.TextSize = Library.FontSize
         Object.TextColor3 = Library.Theme.Text
-        Object.TextStrokeTransparency = 0
+        Object.TextStrokeTransparency = 1
         Object.TextStrokeColor3 = Library.Theme.Border
         Object.Text = ""
     end
@@ -249,13 +250,21 @@ local function ThemeValue(Value)
     return Library.Theme[Value] or Value
 end
 
-Library.AddToTheme = function(Self, Properties)
+Library.AddToTheme = function(Self, Properties, Animated)
     local Data = Library.ThemeMap[Self.Instance] or {}
+    local Goals = {}
     for Property, Value in pairs(Properties) do
         Data[Property] = Value
-        Self.Instance[Property] = ThemeValue(Value)
+        if Animated then
+            Goals[Property] = ThemeValue(Value)
+        else
+            Self.Instance[Property] = ThemeValue(Value)
+        end
     end
     Library.ThemeMap[Self.Instance] = Data
+    if Animated then
+        Self:Tween(Goals)
+    end
     return Self
 end
 Library.ChangeItemTheme = Library.AddToTheme
@@ -292,6 +301,114 @@ Library.Tween = function(Self, Properties, Info, IsRawItem)
     end)
     Tween:Play()
     return Tween
+end
+
+Library.SetFont = function(Self, Face, Size)
+    assert(typeof(Face) == "Font", "SetFont requires a Roblox Font value")
+    Library.Font, Library.FontSize = Face, Size or Library.FontSize
+    if Library.Holder then
+        for _, Object in ipairs(Library.Holder.Instance:GetDescendants()) do
+            if Object:IsA("TextLabel") or Object:IsA("TextButton") or Object:IsA("TextBox") then
+                Object.FontFace, Object.TextSize = Library.Font, Library.FontSize
+            end
+        end
+    end
+end
+
+Library.LoadProggyClean = function(Self)
+    local Asset = Environment.getcustomasset or Environment.getsynasset or getcustomasset or getsynasset
+    local IsFile, Write = Environment.isfile or isfile, Environment.writefile or writefile
+    local IsFolder, MakeFolder = Environment.isfolder or isfolder, Environment.makefolder or makefolder
+    if not (Asset and IsFile and Write and IsFolder and MakeFolder) then
+        Library.FontStatus = "Fallback: custom-font/file APIs unavailable"
+        return false, Library.FontStatus
+    end
+    local Success, Result = pcall(function()
+        local Folder = Library.Directory .. Library.Folders.Assets
+        if not IsFolder(Library.Directory) then MakeFolder(Library.Directory) end
+        if not IsFolder(Folder) then MakeFolder(Folder) end
+        local Ttf, Descriptor = Folder .. "/ProggyClean.ttf", Folder .. "/ProggyClean.font"
+        if not IsFile(Ttf) then
+            local Bytes = game:HttpGet("https://raw.githubusercontent.com/ocornut/imgui/master/misc/fonts/ProggyClean.ttf")
+            assert(#Bytes > 1000 and Bytes:sub(1, 4) == "\0\1\0\0", "Invalid ProggyClean TTF response")
+            Write(Ttf, Bytes)
+        end
+        Write(Descriptor, HttpService:JSONEncode({ name = "ProggyClean", faces = {
+            { name = "Regular", weight = 400, style = "normal", assetId = Asset(Ttf) },
+        } }))
+        return Font.new(Asset(Descriptor), Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+    end)
+    if Success then
+        Library:SetFont(Result, 13)
+        Library.FontStatus = "ProggyClean"
+        return true
+    end
+    Library.FontStatus = "Fallback: " .. tostring(Result)
+    return false, Library.FontStatus
+end
+Library:LoadProggyClean()
+
+-- Group fades preserve live toggle/color values while transitions are running.
+Library.AnimatedVisibility = function(Self, Visible, Instant)
+    local Object = Self.Instance
+    Self.VisibilityVersion = (Self.VisibilityVersion or 0) + 1
+    local Version = Self.VisibilityVersion
+    Visible = Visible == true
+    if not Object:IsA("CanvasGroup") then
+        Object.Visible = Visible
+        return
+    end
+    if Visible and not Object.Visible then
+        Object.GroupTransparency = 1
+    end
+    Object.Visible = true
+    pcall(function() Object.Interactable = Visible end)
+    local Goals = { GroupTransparency = Visible and 0 or 1 }
+    if Instant or Library.Animation.Time <= 0 then
+        Object.GroupTransparency, Object.Visible = Goals.GroupTransparency, Visible
+        return
+    end
+    Self:Tween(Goals)
+    Library:Delay(Library.Animation.Time, function()
+        if Self.VisibilityVersion == Version and Object.Parent then
+            Object.Visible = Visible
+        end
+    end)
+end
+
+Library.AnimateButton = function(Self)
+    local Object = Self.Instance
+    local Scale = Library:Create("UIScale", { Parent = Self, Scale = 1 })
+    local function Hover(Entered)
+        local Properties = Library.ThemeMap[Object] or {}
+        if Properties.BackgroundColor3 then
+            Self:Tween({ BackgroundColor3 = Entered and Library.Theme["Hovered Element"]
+                or ThemeValue(Properties.BackgroundColor3) })
+        end
+        if Properties.TextColor3 then
+            Self:Tween({ TextColor3 = Entered and Library.Theme.Accent or ThemeValue(Properties.TextColor3) })
+        end
+        if not Entered then Scale:Tween({ Scale = 1 }) end
+    end
+    Self:Connect("MouseEnter", function() Hover(true) end)
+    Self:Connect("MouseLeave", function() Hover(false) end)
+    Self:Connect("InputBegan", function(Input)
+        if Primary(Input) and not Self.NoPressScale then Scale:Tween({ Scale = 0.985 }) end
+    end)
+    Self:Connect("InputEnded", function(Input)
+        if Primary(Input) then Scale:Tween({ Scale = 1 }) end
+    end)
+    return Self
+end
+
+Library.AnimateTextbox = function(Self)
+    Self:Connect("Focused", function()
+        Self:Tween({ BackgroundColor3 = Library.Theme["Hovered Element"] })
+    end)
+    Self:Connect("FocusLost", function()
+        Self:Tween({ BackgroundColor3 = Library.Theme.Element })
+    end)
+    return Self
 end
 
 Library.GetTweenProperty = function(Self, IsRawItem)
@@ -402,6 +519,16 @@ local function Frame(Parent, Name, Size, Position, Theme)
     return Item
 end
 
+local function Group(Parent, Name, Size, Position, Theme)
+    local Item = Library:Create("CanvasGroup", {
+        Name = Name, Parent = Parent, Size = Size or UDim2.fromScale(1, 1),
+        Position = Position or UDim2.new(), BackgroundTransparency = Theme and 0 or 1,
+        GroupTransparency = 0,
+    })
+    if Theme then Item:AddToTheme({ BackgroundColor3 = Theme }) end
+    return Item
+end
+
 local function Text(Parent, Name, Value, Size, Position, Theme)
     return Library:Create("TextLabel", {
         Name = Name, Parent = Parent, Text = tostring(Value or ""),
@@ -419,7 +546,7 @@ local function Button(Parent, Name, Value, Size, Position, Theme)
     if Theme then
         Item:AddToTheme({ BackgroundColor3 = Theme })
     end
-    return Item
+    return Item:AnimateButton()
 end
 
 local function Border(Item, Double)
@@ -485,15 +612,16 @@ end
 
 local function Control(Self, Params, Kind, Height)
     local Name = Option(Params, "Name", Kind)
-    local Item = Frame(ContentParent(Self, Params), Kind .. "_Frame", UDim2.new(1, 0, 0, Height))
+    local Item = Group(ContentParent(Self, Params), Kind .. "_Frame", UDim2.new(1, 0, 0, Height))
     local Data = setmetatable({
         Kind = Kind, Name = Name, Flag = Flag(Params, Name), Section = Self,
         Window = Self.Window, Page = Self.Page,
-        Callback = Option(Params, "Callback"), Items = {}, Instance = Item.Instance,
+        Callback = Option(Params, "Callback"), Items = {}, Instance = Item.Instance, Visible = true,
     }, Library)
     Data.Items[Kind] = Item
     function Data:SetVisibility(Bool)
-        Item.Instance.Visible = Bool == true
+        self.Visible = Bool == true
+        Item:AnimatedVisibility(Bool)
         if not Bool then
             Library:CloseOpenFrames(Item.Instance)
         end
@@ -507,6 +635,10 @@ local function Control(Self, Params, Kind, Height)
         return self
     end
     Item:Tooltip(Option(Params, "Tooltip"))
+    Item.Instance.GroupTransparency = 1
+    Library:Delay(0, function()
+        if Item.Instance.Parent and Data.Visible then Item:AnimatedVisibility(true) end
+    end)
     return Data, Item
 end
 
@@ -542,7 +674,7 @@ end
 
 Library.BindDrag = function(Self, Callback)
     Self:Connect("InputBegan", function(Input)
-        if Primary(Input) and IsVisible(Self) and not Library.ActiveConfirmDialog then
+        if Primary(Input) and Library.WindowOpenState and IsVisible(Self) and not Library.ActiveConfirmDialog then
             Library.Drag = { Input = Input, Update = Callback }
             Callback(Pointer(Input), true)
         end
@@ -565,9 +697,10 @@ Library.MakeDraggable = function(Self, Handle)
             Start = Point
         end
         local Delta, Size, Bounds = Point - Start, Object.AbsoluteSize, ScreenSize()
-        Object.Position = UDim2.fromOffset(
-            math.clamp(Position.X + Delta.X, 28, math.max(28, Bounds.X - Size.X - 3)),
-            math.clamp(Position.Y + Delta.Y, 32, math.max(32, Bounds.Y - Size.Y - 3)))
+        Self:Tween({ Position = UDim2.fromOffset(
+            math.clamp(Position.X + Delta.X, 3, math.max(3, Bounds.X - Size.X - 3)),
+            math.clamp(Position.Y + Delta.Y, 32, math.max(32, Bounds.Y - Size.Y - 3))) },
+            TweenInfo.new(math.min(0.07, Library.Animation.Time), Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
     end)
     return Self
 end
@@ -584,9 +717,10 @@ Library.MakeResizeable = function(Self, Minimum)
         local Delta, Bounds = Point - Start, ScreenSize()
         local Position = Object.AbsolutePosition - RootOrigin()
         local MaxX, MaxY = math.max(80, Bounds.X - Position.X - 3), math.max(80, Bounds.Y - Position.Y - 3)
-        Object.Size = UDim2.fromOffset(
+        Self:Tween({ Size = UDim2.fromOffset(
             math.clamp(Size.X + Delta.X, math.min(Minimum.X, MaxX), MaxX),
-            math.clamp(Size.Y + Delta.Y, math.min(Minimum.Y, MaxY), MaxY))
+            math.clamp(Size.Y + Delta.Y, math.min(Minimum.Y, MaxY), MaxY)) },
+            TweenInfo.new(math.min(0.1, Library.Animation.Time), Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
     end)
     return Self
 end
@@ -647,7 +781,7 @@ local function PopupPosition(Popup)
 end
 
 local function Popup(Anchor, Size, Name)
-    local Item = Frame(Library.PopupLayer, Name, Size, nil, "Background")
+    local Item = Group(Library.PopupLayer, Name, Size, nil, "Background")
     Border(Item)
     Item.Instance.Visible = false
     local Data = { AttachedButton = Raw(Anchor), Frame = Item.Instance, IsOpen = false, Item = Item }
@@ -669,12 +803,12 @@ local function Popup(Anchor, Size, Name)
                 Other:SetOpen(false)
             end
             Library.OpenFrames[self] = true
-            self.Frame.Visible = true
+            Item:AnimatedVisibility(true)
             PopupPosition(self)
         else
             Library:CloseOpenFrames(self.Frame)
             Library.OpenFrames[self] = nil
-            self.Frame.Visible = false
+            Item:AnimatedVisibility(false)
         end
         self.IsOpen = Bool
         if self.OnOpenChanged then
@@ -777,7 +911,7 @@ Library.Tooltip = function(Self, Data)
             return
         end
         Hide()
-        TooltipItem = Frame(Library.PopupLayer, "Tooltip", UDim2.fromOffset(230, 66), nil, "Background")
+        TooltipItem = Group(Library.PopupLayer, "Tooltip", UDim2.fromOffset(230, 66), nil, "Background")
         TooltipItem.Instance.ZIndex = 50
         Border(TooltipItem)
         local Title = Option(Data, "Title", "")
@@ -794,6 +928,8 @@ Library.Tooltip = function(Self, Data)
         TooltipItem.Instance.Position = UDim2.fromOffset(
             math.clamp(Point.X - Origin.X + 15, 3, math.max(3, Bounds.X - 233)),
             math.clamp(Point.Y - Origin.Y + 15, 32, math.max(32, Bounds.Y - 69)))
+        TooltipItem.Instance.Visible = false
+        TooltipItem:AnimatedVisibility(true)
     end, Hide)
     Self:Connect("Destroying", Hide)
     Library:BindToWindowVisibility(function(Open)
@@ -820,7 +956,7 @@ local function Panel(Params, Kind, DefaultSize, DefaultPosition)
     local Height = math.min(Size.Y.Scale * Bounds.Y + Size.Y.Offset, math.max(100, Bounds.Y - 42))
     local X = Position.X.Scale * Bounds.X + Position.X.Offset
     local Y = Position.Y.Scale * Bounds.Y + Position.Y.Offset
-    local Main = Frame(Library.Root, Kind .. "_Frame", UDim2.fromOffset(Width, Height),
+    local Main = Group(Library.Root, Kind .. "_Frame", UDim2.fromOffset(Width, Height),
         UDim2.fromOffset(math.clamp(X, 28, math.max(28, Bounds.X - Width - 3)),
             math.clamp(Y, 32, math.max(32, Bounds.Y - Height - 3))), "Background")
     Border(Main)
@@ -836,9 +972,13 @@ local function Panel(Params, Kind, DefaultSize, DefaultPosition)
         Instance = Main.Instance, Items = { MainFrame = Main, Text = Title, AccentLiner = Accent },
     }, Library)
     function Data:ApplyVisibility()
-        Main.Instance.Visible = self.Visible and Library.WindowOpenState
+        local Visible = self.Visible and Library.WindowOpenState
+        if self.RenderVisible ~= Visible then
+            self.RenderVisible = Visible
+            Main:AnimatedVisibility(Visible)
+        end
         if self.HeaderButton then
-            self.HeaderButton:SetActive(Main.Instance.Visible)
+            self.HeaderButton:SetActive(Visible)
         end
     end
     function Data:SetVisibility(Bool)
@@ -867,6 +1007,7 @@ local function Panel(Params, Kind, DefaultSize, DefaultPosition)
     function Data:GetBounds()
         return Main.Instance.AbsolutePosition, Main.Instance.AbsoluteSize
     end
+    Main.Instance.Visible = false
     Library:BindToWindowVisibility(function()
         Data:ApplyVisibility()
     end, Main)
@@ -927,7 +1068,7 @@ Library.TopBar = function(Self, Params)
             Callback = Option(Config, "Callback") }
         function New:SetActive(Bool)
             self.Active = Bool == true
-            Item:AddToTheme({ TextColor3 = self.Active and "Accent" or "Inactive Text" })
+            Item:AddToTheme({ TextColor3 = self.Active and "Accent" or "Inactive Text" }, true)
         end
         function New:SetText(Value)
             Item.Instance.Text = tostring(Value)
@@ -986,25 +1127,7 @@ Library.Window = function(Self, Params)
         Library:TopBar({ Name = Option(Params, "Brand", "Atarazia") })
         AttachPanelButton(Window, Option(Params, "ButtonName", "Home"))
     end
-    if Option(Params, "Sidebar", true) then
-        local Sidebar = Frame(Library.Root, "SideBarForTopBar_Frame", UDim2.new(0, 26, 1, -26),
-            UDim2.fromOffset(0, 26), "Background")
-        Border(Sidebar)
-        Sidebar.Instance.ZIndex = 55
-        Library:BindToWindowVisibility(function(Open)
-            Sidebar.Instance.Visible = Open
-        end, Sidebar)
-        Window.Items.Sidebar = Sidebar
-    end
-    if Option(Params, "DesktopBackground", false) then
-        local Backdrop = Frame(Library.Root, "DesktopBackground", nil, nil)
-        Backdrop.Instance.BackgroundColor3 = Color3.fromRGB(171, 185, 204)
-        Backdrop.Instance.BackgroundTransparency = 0
-        Backdrop.Instance.ZIndex = 0
-        Library:BindToWindowVisibility(function(Open)
-            Backdrop.Instance.Visible = Open
-        end, Backdrop)
-    end
+    -- Sidebar and desktop background were removed, including legacy options.
     local Image = Option(Params, "PreviewImage", "rbxassetid://71195216490355")
     if Image and Image ~= "" then
         Window.Items.PreviewImage = Library:Create("ImageLabel", {
@@ -1053,7 +1176,8 @@ Library.Page = function(Self, Params)
     local Name = Option(Params, "Name", "Page")
     local Tab = Button(Self.Items.PagesOutline, "Tab_Button", Name)
     Border(Tab)
-    local Body = Frame(Self.Items.Content, "Page_" .. Name)
+    local Body = Group(Self.Items.Content, "Page_" .. Name)
+    Body.Instance.Visible = false
     local SubTabs = Frame(Body, "SubPages", UDim2.new(1, -6, 0, 30), UDim2.fromOffset(3, 3))
     SubTabs.Instance.Visible = false
     local Content = Frame(Body, "Columns")
@@ -1071,8 +1195,12 @@ Library.Page = function(Self, Params)
             Library:CloseOpenFrames(Body.Instance)
         end
         self.Active = Bool == true
-        Body.Instance.Visible = self.Active
-        Tab:AddToTheme({ TextColor3 = self.Active and "Accent" or "Inactive Text" })
+        if self.Active then
+            Body:AnimatedVisibility(true)
+        else
+            Body:AnimatedVisibility(false, true)
+        end
+        Tab:AddToTheme({ TextColor3 = self.Active and "Accent" or "Inactive Text" }, true)
     end
     Tab:Connect("Activated", function()
         Page:Turn(true)
@@ -1103,11 +1231,15 @@ Library.SubPage = function(Self, Params)
         for _, Column in ipairs(Self.ColumnsData) do
             Column.Instance.Visible = false
         end
-        Self.Items.Columns.Instance.Position = UDim2.fromOffset(0, 37)
-        Self.Items.Columns.Instance.Size = UDim2.new(1, 0, 1, -37)
+        -- Keep a lone NH SubPage transparent in the layout, like the reference.
+        local ShowTabs = #Self.Pages > 0
+        SubTabs.Instance.Visible = ShowTabs
+        Self.Items.Columns.Instance.Position = UDim2.fromOffset(0, ShowTabs and 37 or 0)
+        Self.Items.Columns.Instance.Size = UDim2.new(1, 0, 1, ShowTabs and -37 or 0)
     end
-    local Content = Frame(SectionMode and Self.Items.Section or Self.Items.Columns, "SubPage_" .. Name,
+    local Content = Group(SectionMode and Self.Items.Section or Self.Items.Columns, "SubPage_" .. Name,
         SectionMode and UDim2.new(1, -24, 0, 0) or nil, SectionMode and UDim2.fromOffset(12, 50) or nil)
+    Content.Instance.Visible = false
     local Data = setmetatable({ Kind = SectionMode and "SubTab" or "SubPage", Name = Name,
         Window = Self.Window, Page = Self, Active = false,
         Items = { Inactive = Tab, Text = Tab, Page = Content, Content = Content } }, Library)
@@ -1131,8 +1263,8 @@ Library.SubPage = function(Self, Params)
             Library:CloseOpenFrames(Content.Instance)
         end
         self.Active = Bool == true
-        Content.Instance.Visible = self.Active
-        Tab:AddToTheme({ TextColor3 = self.Active and "Accent" or "Inactive Text" })
+        Content:AnimatedVisibility(self.Active, not self.Active)
+        Tab:AddToTheme({ TextColor3 = self.Active and "Accent" or "Inactive Text" }, true)
     end
     Tab:Connect("Activated", function()
         Data:Turn(true)
@@ -1228,7 +1360,8 @@ Library.Toggle = function(Self, Params)
     Attachments(Data, Hitbox)
     function Data:Set(Bool, Silent)
         Bool = Bool == true
-        self.Items.Inline.Instance.Visible = Bool
+        self.Items.Inline.Instance.Visible = true
+        self.Items.Inline:Tween({ BackgroundTransparency = Bool and 0 or 1 })
         Commit(self, Bool, Silent)
         return self
     end
@@ -1275,11 +1408,6 @@ Library.Button = function(Self, Params)
     function Data:Press()
         Library:SafeCall(self.Callback)
     end
-    Hitbox:OnHover(function()
-        Hitbox:AddToTheme({ BackgroundColor3 = "Hovered Element" })
-    end, function()
-        Hitbox:AddToTheme({ BackgroundColor3 = "Element" })
-    end)
     Hitbox:Connect("Activated", function()
         Data:Press()
     end)
@@ -1288,7 +1416,7 @@ end
 
 Library.Slider = function(Self, Params)
     Params = Params or {}
-    local Data, Row = Control(Self, Params, "Slider", 30)
+    local Data, Row = Control(Self, Params, "Slider", 24)
     Data.Min, Data.Max = Option(Params, "Min", 0), Option(Params, "Max", 100)
     assert(Data.Max >= Data.Min, "Slider Max must be greater than or equal to Min")
     Data.Decimals, Data.Suffix = Option(Params, "Decimals", 0), Option(Params, "Suffix", "")
@@ -1297,11 +1425,11 @@ Library.Slider = function(Self, Params)
     local ValueText = Text(Row, "SliderValue_Label", "", UDim2.new(0.4, 0, 0, 16), UDim2.fromScale(0.6, 0))
     ValueText.Instance.TextXAlignment = Enum.TextXAlignment.Right
     Data.Items.Value = ValueText
-    local Bar = Frame(Row, "SliderBar_Frame", UDim2.new(1, 0, 0, 7), UDim2.fromOffset(0, 21), "Element")
+    local Bar = Frame(Row, "SliderBar_Frame", UDim2.new(1, 0, 0, 7), UDim2.fromOffset(0, 17), "Element")
     Border(Bar, false)
     local Fill = Frame(Bar, "SliderFill_Frame", nil, nil, "Accent")
     Data.Items.Accent = Fill
-    local Hitbox = Button(Row, "RealSlider", "", UDim2.new(1, 0, 0, 14), UDim2.fromOffset(0, 16))
+    local Hitbox = Button(Row, "RealSlider", "", UDim2.new(1, 0, 0, 14), UDim2.fromOffset(0, 12))
     Data.Items.RealSlider = Hitbox
     function Data:Set(Value, Silent)
         Value = tonumber(Value)
@@ -1310,7 +1438,7 @@ Library.Slider = function(Self, Params)
         end
         Value = math.clamp(Library:Round(math.clamp(Value, self.Min, self.Max), self.Decimals), self.Min, self.Max)
         local Alpha = self.Max == self.Min and 1 or (Value - self.Min) / (self.Max - self.Min)
-        Fill.Instance.Size = UDim2.fromScale(Alpha, 1)
+        Fill:Tween({ Size = UDim2.fromScale(Alpha, 1) })
         ValueText.Instance.Text = string.format("%s%s", tonumber(string.format("%.6f", Value)), self.Suffix)
         Commit(self, Value, Silent)
         return self
@@ -1343,7 +1471,7 @@ local function Selection(Self, Params, SearchMode)
             Name = "Input", Parent = Row, Size = UDim2.new(1, 0, 0, 23),
             PlaceholderText = Option(Params, "Placeholder", "Search ..."),
             ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
-        }):AddToTheme({ BackgroundColor3 = "Element", PlaceholderColor3 = "Inactive Text" })
+    }):AddToTheme({ BackgroundColor3 = "Element", PlaceholderColor3 = "Inactive Text" }):AnimateTextbox()
         Border(Search)
         Holder = Scroll(Row, "Holder", UDim2.new(1, 0, 1, -29), UDim2.fromOffset(0, 29), 4)
         Data.Items.Input, Data.Items.Holder = Search, Holder
@@ -1379,7 +1507,7 @@ local function Selection(Self, Params, SearchMode)
         end
         for Name, Entry in pairs(Data.Options) do
             Entry.IsSelected = Data.Multi and table.find(Data.Value, Name) ~= nil or (not Data.Multi and Data.Value == Name)
-            Entry.Button:AddToTheme({ TextColor3 = Entry.IsSelected and "Accent" or "Inactive Text" })
+            Entry.Button:AddToTheme({ TextColor3 = Entry.IsSelected and "Accent" or "Inactive Text" }, true)
         end
     end
     function Data:Set(Value, Silent)
@@ -1433,7 +1561,7 @@ local function Selection(Self, Params, SearchMode)
             end
         end
         function Entry:ToggleState(ValueState)
-            Item:AddToTheme({ TextColor3 = ValueState == "Active" and "Accent" or "Inactive Text" })
+            Item:AddToTheme({ TextColor3 = ValueState == "Active" and "Accent" or "Inactive Text" }, true)
         end
         Item:Connect("Activated", function()
             Entry:Set()
@@ -1510,7 +1638,7 @@ Library.Textbox = function(Self, Params)
         Name = "Input", Parent = Row, Size = UDim2.fromScale(1, 1),
         PlaceholderText = Option(Params, "Placeholder", Data.Name .. " ..."),
         ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
-    }):AddToTheme({ BackgroundColor3 = "Element", TextColor3 = "Text", PlaceholderColor3 = "Inactive Text" })
+    }):AddToTheme({ BackgroundColor3 = "Element", TextColor3 = "Text", PlaceholderColor3 = "Inactive Text" }):AnimateTextbox()
     Border(Input)
     Padding(Input, 4)
     Data.Items.Input = Input
@@ -1557,19 +1685,42 @@ Library.CreateColorpicker = function(Self, Params)
     local Parent = Option(Params, "Parent")
     assert(Parent, "Use Toggle:Colorpicker() or Label:Colorpicker()")
     local Swatch = Button(Parent, "ColorpickerButton", "", UDim2.fromOffset(22, 12), nil, "Element")
+    Swatch.NoPressScale = true
     Library.ThemeMap[Swatch.Instance].BackgroundColor3 = nil
     Border(Swatch, false)
-    local State, Item = Popup(Swatch, UDim2.fromOffset(230, 224), "ColorpickerWindow")
+    local function Checkers(ParentItem, Columns, Rows)
+        local Background = Frame(ParentItem, "TransparencyGrid")
+        Background.Instance.ClipsDescendants = true
+        for Y = 0, Rows - 1 do
+            for X = 0, Columns - 1 do
+                local Cell = Frame(Background, "Cell", UDim2.fromScale(1 / Columns, 1 / Rows),
+                    UDim2.fromScale(X / Columns, Y / Rows))
+                Cell.Instance.BackgroundTransparency = 0
+                Cell.Instance.BackgroundColor3 = (X + Y) % 2 == 0 and Color3.fromRGB(80, 84, 88)
+                    or Color3.fromRGB(45, 48, 52)
+            end
+        end
+        return Background
+    end
+    Checkers(Swatch, 4, 2)
+    local SwatchFill = Frame(Swatch, "ColorPreview")
+    local State, Item = Popup(Swatch, UDim2.fromOffset(260, 336), "ColorpickerWindow")
     local Data = {
         Flag = Flag(Params, "Color"), Callback = Option(Params, "Callback"),
         Color = Color3.new(1, 1, 1), Alpha = 0, Hue = 0, Saturation = 0, Value = 1,
-        Items = { ColorpickerButton = Swatch, ColorpickerWindow = Item }, IsOpen = false,
+        Items = { ColorpickerButton = Swatch, ColorpickerWindow = Item, SwatchFill = SwatchFill }, IsOpen = false,
         AttachedButton = Swatch.Instance, Frame = Item.Instance,
     }
     State.OnOpenChanged = function(Open)
         Data.IsOpen = Open
     end
-    local Palette = Button(Item, "Palette", "", UDim2.fromOffset(176, 155), UDim2.fromOffset(10, 10), "Element")
+    local Title = Text(Item, "PickerTitle", Option(Params, "Name", "Color picker"), UDim2.new(1, -40, 0, 22),
+        UDim2.fromOffset(10, 3), "Accent")
+    Title.Instance.TextXAlignment = Enum.TextXAlignment.Left
+    local Close = Button(Item, "ClosePicker", "x", UDim2.fromOffset(18, 20), UDim2.new(1, -26, 0, 3))
+    Close:Connect("Activated", function() State:SetOpen(false) end)
+    local Palette = Button(Item, "Palette", "", UDim2.fromOffset(216, 144), UDim2.fromOffset(10, 32), "Element")
+    Palette.NoPressScale = true
     Library.ThemeMap[Palette.Instance].BackgroundColor3 = nil
     Border(Palette, false)
     local Saturation = Frame(Palette, "Saturation")
@@ -1588,11 +1739,12 @@ Library.CreateColorpicker = function(Self, Params)
             NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0),
         }),
     })
-    local Marker = Frame(Palette, "PaletteDragger", UDim2.fromOffset(3, 3), nil, "Text")
+    local Marker = Frame(Palette, "PaletteDragger", UDim2.fromOffset(5, 5), nil, "Text")
     Marker.Instance.AnchorPoint = Vector2.new(0.5, 0.5)
     Marker.Instance.ZIndex = 5
     Border(Marker, false)
-    local Hue = Button(Item, "Hue", "", UDim2.fromOffset(15, 155), UDim2.fromOffset(202, 10), "Element")
+    local Hue = Button(Item, "Hue", "", UDim2.fromOffset(12, 144), UDim2.fromOffset(238, 32), "Element")
+    Hue.NoPressScale = true
     Library.ThemeMap[Hue.Instance].BackgroundColor3 = nil
     Hue.Instance.BackgroundColor3 = Color3.new(1, 1, 1)
     Border(Hue, false)
@@ -1602,8 +1754,16 @@ Library.CreateColorpicker = function(Self, Params)
     end
     Library:Create("UIGradient", { Parent = Hue, Rotation = 90, Color = ColorSequence.new(HueColors) })
     local HueMarker = Frame(Hue, "HueDragger", UDim2.new(1, 0, 0, 2), nil, "Text")
-    local Alpha = Button(Item, "Alpha", "", UDim2.fromOffset(176, 12), UDim2.fromOffset(10, 176), "Element")
+    Text(Item, "OpacityLabel", "Opacity", UDim2.fromOffset(120, 16), UDim2.fromOffset(10, 180))
+        .Instance.TextXAlignment = Enum.TextXAlignment.Left
+    local Opacity = Library:Create("TextBox", {
+        Name = "OpacityInput", Parent = Item, Size = UDim2.fromOffset(58, 16), Position = UDim2.fromOffset(192, 180),
+        BackgroundTransparency = 1, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Right,
+    })
+    local Alpha = Button(Item, "Alpha", "", UDim2.fromOffset(240, 12), UDim2.fromOffset(10, 200), "Element")
+    Alpha.NoPressScale = true
     Border(Alpha, false)
+    Checkers(Alpha, 20, 2)
     local AlphaFill = Frame(Alpha, "AlphaColor")
     AlphaFill.Instance.BackgroundTransparency = 0
     Library:Create("UIGradient", {
@@ -1612,15 +1772,33 @@ Library.CreateColorpicker = function(Self, Params)
         }),
     })
     local AlphaMarker = Frame(Alpha, "AlphaDragger", UDim2.new(0, 2, 1, 0), nil, "Text")
+    Text(Item, "HexLabel", "HEX", UDim2.fromOffset(90, 14), UDim2.fromOffset(10, 216), "Inactive Text")
+        .Instance.TextXAlignment = Enum.TextXAlignment.Left
     local Hex = Library:Create("TextBox", {
-        Name = "Hex", Parent = Item, Size = UDim2.fromOffset(126, 22), Position = UDim2.fromOffset(10, 195),
+        Name = "Hex", Parent = Item, Size = UDim2.fromOffset(90, 24), Position = UDim2.fromOffset(10, 232),
         ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
-    }):AddToTheme({ BackgroundColor3 = "Element" })
+    }):AddToTheme({ BackgroundColor3 = "Element" }):AnimateTextbox()
     Border(Hex)
-    local Copy = Button(Item, "Copy", "Copy", UDim2.fromOffset(35, 22), UDim2.fromOffset(143, 195))
-    local Paste = Button(Item, "Paste", "Paste", UDim2.fromOffset(35, 22), UDim2.fromOffset(182, 195))
+    Padding(Hex, 4)
+    local RGB = {}
+    for Index, Name in ipairs({ "R", "G", "B" }) do
+        local X = 110 + (Index - 1) * 48
+        Text(Item, Name .. "Label", Name, UDim2.fromOffset(44, 14), UDim2.fromOffset(X, 216), "Inactive Text")
+        RGB[Index] = Library:Create("TextBox", {
+            Name = Name .. "Input", Parent = Item, Size = UDim2.fromOffset(44, 24), Position = UDim2.fromOffset(X, 232),
+            ClearTextOnFocus = false,
+        }):AddToTheme({ BackgroundColor3 = "Element" }):AnimateTextbox()
+        Border(RGB[Index])
+    end
+    local Copy = Button(Item, "Copy", "Copy", UDim2.fromOffset(76, 24), UDim2.fromOffset(10, 266), "Element")
+    local Paste = Button(Item, "Paste", "Paste", UDim2.fromOffset(76, 24), UDim2.fromOffset(92, 266), "Element")
+    local Reset = Button(Item, "Reset", "Reset", UDim2.fromOffset(76, 24), UDim2.fromOffset(174, 266), "Element")
+    Border(Copy)
+    Border(Paste)
+    Border(Reset)
     Data.Items.Palette, Data.Items.PaletteDragger, Data.Items.Hue, Data.Items.HueDragger = Palette, Marker, Hue, HueMarker
     Data.Items.Alpha, Data.Items.AlphaDragger, Data.Items.Hex = Alpha, AlphaMarker, Hex
+    Data.Items.RGBInputs, Data.Items.Opacity, Data.Items.Copy, Data.Items.Paste, Data.Items.Reset = RGB, Opacity, Copy, Paste, Reset
     function Data:SetOpen(Bool)
         State:SetOpen(Bool)
     end
@@ -1634,13 +1812,24 @@ Library.CreateColorpicker = function(Self, Params)
         self.Color = Color3.fromHSV(self.Hue, self.Saturation, self.Value)
         self.HexValue = self.Color:ToHex()
         Swatch.Instance.BackgroundColor3 = self.Color
-        Swatch.Instance.BackgroundTransparency = self.Alpha
-        Palette.Instance.BackgroundColor3 = Color3.fromHSV(self.Hue, 1, 1)
-        AlphaFill.Instance.BackgroundColor3 = self.Color
-        Marker.Instance.Position = UDim2.fromScale(self.Saturation, 1 - self.Value)
-        HueMarker.Instance.Position = UDim2.new(0, 0, self.Hue, -1)
-        AlphaMarker.Instance.Position = UDim2.new(self.Alpha, -1, 0, 0)
-        Hex.Instance.Text = "#" .. self.HexValue
+        Swatch.Instance.BackgroundTransparency = 1
+        SwatchFill:Tween({ BackgroundColor3 = self.Color, BackgroundTransparency = self.Alpha })
+        Palette:Tween({ BackgroundColor3 = Color3.fromHSV(self.Hue, 1, 1) })
+        AlphaFill:Tween({ BackgroundColor3 = self.Color })
+        local CursorInfo = TweenInfo.new(math.min(0.06, Library.Animation.Time), Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        Marker:Tween({ Position = UDim2.fromScale(self.Saturation, 1 - self.Value) }, CursorInfo)
+        HueMarker:Tween({ Position = UDim2.new(0, 0, self.Hue, -1) }, CursorInfo)
+        AlphaMarker:Tween({ Position = UDim2.new(self.Alpha, -1, 0, 0) }, CursorInfo)
+        if UserInputService:GetFocusedTextBox() ~= Hex.Instance then Hex.Instance.Text = "#" .. self.HexValue end
+        local Channels = { self.Color.R, self.Color.G, self.Color.B }
+        for Index, Input in ipairs(RGB) do
+            if UserInputService:GetFocusedTextBox() ~= Input.Instance then
+                Input.Instance.Text = tostring(math.round(Channels[Index] * 255))
+            end
+        end
+        if UserInputService:GetFocusedTextBox() ~= Opacity.Instance then
+            Opacity.Instance.Text = tostring(math.round((1 - self.Alpha) * 100)) .. "%"
+        end
         Library.Flags[self.Flag] = {
             Color = self.Color, Alpha = self.Alpha, HexValue = self.HexValue, Transparency = 1 - self.Alpha,
         }
@@ -1654,7 +1843,12 @@ Library.CreateColorpicker = function(Self, Params)
         end
         local Success, Parsed = pcall(function()
             if type(Color) == "string" then
-                return Color3.fromHex(Color:gsub("#", ""))
+                local HexValue = Color:gsub("#", ""):gsub("%s", "")
+                if #HexValue == 3 then
+                    HexValue = HexValue:gsub(".", function(Character) return Character .. Character end)
+                end
+                assert(HexValue:match("^%x%x%x%x%x%x$"), "Invalid hex color")
+                return Color3.fromHex(HexValue)
             elseif type(Color) == "table" then
                 return Color3.fromRGB(Color[1], Color[2], Color[3])
             end
@@ -1668,6 +1862,15 @@ Library.CreateColorpicker = function(Self, Params)
         self.Alpha = math.clamp(tonumber(Transparency) or self.Alpha, 0, 1)
         self:Update(Silent)
         return self
+    end
+    function Data:SetRGB(R, G, B)
+        local Channels = { tonumber(R), tonumber(G), tonumber(B) }
+        for Index = 1, 3 do
+            local Value = Channels[Index]
+            if not Value or Value ~= Value or math.abs(Value) == math.huge then return false end
+            Channels[Index] = math.round(math.clamp(Value, 0, 255))
+        end
+        return self:Set(Color3.fromRGB(table.unpack(Channels)), self.Alpha)
     end
     Palette:BindDrag(function(Point)
         local Position, Size = Palette.Instance.AbsolutePosition, Palette.Instance.AbsoluteSize
@@ -1688,9 +1891,35 @@ Library.CreateColorpicker = function(Self, Params)
             Hex.Instance.Text = "#" .. Data.HexValue
         end
     end)
+    for _, Input in ipairs(RGB) do
+        Input:Connect("FocusLost", function()
+            if not Data:SetRGB(RGB[1].Instance.Text, RGB[2].Instance.Text, RGB[3].Instance.Text) then
+                Data:Update(true)
+            end
+        end)
+    end
+    Opacity:Connect("FocusLost", function()
+        local Value = tonumber((Opacity.Instance.Text:gsub("%%", "")))
+        if Value and Value == Value and math.abs(Value) ~= math.huge then
+            Data:Set(Data.Color, 1 - math.clamp(Value, 0, 100) / 100)
+        else
+            Data:Update(true)
+        end
+    end)
     Copy:Connect("Activated", function()
         Library.CopiedColor = { Color = Data.Color, Alpha = Data.Alpha }
+        Copy.Instance.Text = "Copied"
+        Library:Delay(0.8, function() if Copy.Instance.Parent then Copy.Instance.Text = "Copy" end end)
     end)
+    Reset:Connect("Activated", function() Data:Set(Data.DefaultColor, Data.DefaultAlpha) end)
+    local Presets = { Color3.fromRGB(216, 235, 255), Color3.fromRGB(255, 255, 255), Color3.fromRGB(255, 95, 95),
+        Color3.fromRGB(110, 225, 160), Color3.fromRGB(120, 170, 255), Color3.fromRGB(245, 210, 110) }
+    for Index, Color in ipairs(Presets) do
+        local Preset = Button(Item, "Preset" .. Index, "", UDim2.fromOffset(34, 20), UDim2.fromOffset(10 + (Index - 1) * 41, 304))
+        Preset.Instance.BackgroundTransparency, Preset.Instance.BackgroundColor3 = 0, Color
+        Border(Preset)
+        Preset:Connect("Activated", function() Data:Set(Color, Data.Alpha) end)
+    end
     Paste:Connect("Activated", function()
         if Library.CopiedColor then
             Data:Set(Library.CopiedColor)
@@ -1700,6 +1929,7 @@ Library.CreateColorpicker = function(Self, Params)
         Data:Set(Value, Transparency)
     end)
     Data:Set(Option(Params, "Default", Color3.new(1, 1, 1)), Option(Params, "Alpha", 0))
+    Data.DefaultColor, Data.DefaultAlpha = Data.Color, Data.Alpha
     return Data, Data.Items
 end
 
@@ -1733,11 +1963,11 @@ Library.CreateKeybind = function(Self, Params)
         Flag = Flag(Params, "Keybind"), Name = Option(Params, "Name", "Keybind"),
         Callback = Option(Params, "Callback"), Key = "None", Value = "None",
         Mode = Option(Params, "Mode", "Toggle"), Toggled = false, Picking = false,
-        Disabled = false, ShowInList = true, Items = { KeyButton = KeyButton }, IsOpen = false,
+        Disabled = false, Items = { KeyButton = KeyButton }, IsOpen = false,
     }
     -- The left click captures a key; the right click opens mode settings.
     local ModeAnchor = Button(Parent, "ModeButton", ":", UDim2.fromOffset(8, 16))
-    local State, Item = Popup(ModeAnchor, UDim2.fromOffset(180, 98), "KeybindWindow")
+    local State, Item = Popup(ModeAnchor, UDim2.fromOffset(180, 48), "KeybindWindow")
     Data.Items.KeybindWindow, Data.Items.ModeButton = Item, ModeAnchor
     Data.Frame, Data.AttachedButton = Item.Instance, ModeAnchor.Instance
     State.OnOpenChanged = function(Open)
@@ -1751,11 +1981,6 @@ Library.CreateKeybind = function(Self, Params)
         Library.Flags[self.Flag] = { Key = self.Key, Mode = self.Mode, Toggled = self.Toggled }
         KeyButton.Instance.Text = self.Picking and "[...]" or "[" .. self.Value .. "]"
         KeyButton.Instance.Size = UDim2.fromOffset(math.max(36, #KeyButton.Instance.Text * 7), 16)
-        if self.ListItem then
-            self.ListItem:Set(self.Value, self.Name, self.Mode)
-            self.ListItem:SetVis(self.ShowInList)
-            self.ListItem:SetStatus(self.Toggled)
-        end
         if not Silent then
             Library:SafeCall(self.Callback, self.Toggled)
         end
@@ -1832,11 +2057,6 @@ Library.CreateKeybind = function(Self, Params)
             Data:SetMode(Value)
         end,
     })
-    Settings:Toggle({ Name = "Show in keybinds list", Flag = Data.Flag .. "ShowInKeybindsList", Default = true,
-        Callback = function(Value)
-            Data.ShowInList = Value
-            Data:Update(true)
-        end })
     KeyButton:Connect("Activated", function()
         if Data.Disabled then
             return
@@ -1854,14 +2074,8 @@ Library.CreateKeybind = function(Self, Params)
     Library:RegisterCleanup(KeyButton, function()
         Data:CancelPicking()
         Library.Keybinds[Data] = nil
-        if Data.ListItem then
-            Data.ListItem:Destroy()
-        end
     end)
     Library.Keybinds[Data] = true
-    if Library.KeyList then
-        Data.ListItem = Library.KeyList:Add(Data.Value, Data.Name, Data.Mode)
-    end
     RegisterFlag(Data.Flag, KeyButton, function(Value)
         Data:Set(Value)
     end)
@@ -1869,40 +2083,8 @@ Library.CreateKeybind = function(Self, Params)
     return Data, Data.Items
 end
 
-Library.KeybindList = function(Self, Params)
-    Params = Params or {}
-    local Data = Panel(Params, "KeybindList", Vector2.new(220, 160), UDim2.fromOffset(36, 400))
-    local Content = Scroll(Data.Items.MainFrame, "Content", UDim2.new(1, -14, 1, -44), UDim2.fromOffset(7, 37), 3)
-    Data.Items.KeybindList, Data.Items.Content = Data.Items.MainFrame, Content
-    function Data:Add(Key, Name, Mode)
-        local Item = Text(Content, "Key", "", UDim2.new(1, 0, 0, 17))
-        Item.Instance.TextXAlignment = Enum.TextXAlignment.Left
-        Item.CanShow, Item.Active = true, false
-        function Item:Set(NewKey, NewName, NewMode)
-            self.Instance.Text = tostring(NewKey) .. " - " .. tostring(NewName) .. " - " .. tostring(NewMode)
-        end
-        function Item:SetStatus(Bool)
-            self.Active = Bool == true
-            self.Instance.Visible = self.Active and self.CanShow
-        end
-        function Item:SetVis(Bool)
-            self.CanShow = Bool == true
-            self:SetStatus(self.Active)
-        end
-        Item:Set(Key, Name, Mode)
-        Item:SetStatus(false)
-        return Item
-    end
-    Library.KeyList = Data
-    for Keybind in pairs(Library.Keybinds) do
-        Keybind.ListItem = Data:Add(Keybind.Value, Keybind.Name, Keybind.Mode)
-        Keybind:Update(true)
-    end
-    return Data
-end
-
 Library.Notification = function(Self, Name, Duration, Color)
-    local Item = Frame(Library.NotifHolder, "Notification", UDim2.fromOffset(294, 30), nil, "Background")
+    local Item = Group(Library.NotifHolder, "Notification", UDim2.fromOffset(294, 30), nil, "Background")
     Border(Item)
     local Accent = Frame(Item, "Accent", UDim2.new(0, 2, 1, 0), nil, "Accent")
     if Color then
@@ -1917,578 +2099,17 @@ Library.Notification = function(Self, Name, Duration, Color)
             return
         end
         Closed = true
-        self:Destroy()
+        self:AnimatedVisibility(false)
+        Library:Delay(Library.Animation.Time, function() self:Destroy() end)
     end
     Library:Delay(tonumber(Duration) or 3, function()
         Item:Close()
     end)
+    Item.Instance.Visible = false
+    Item:AnimatedVisibility(true)
     return Item
 end
 Library.Notify = Library.Notification
-
-Library.Watermark = function(Self, Params)
-    Params = Params or {}
-    local Main = Frame(Library.Root, "Watermark", UDim2.fromOffset(300, 24),
-        Option(Params, "Position", UDim2.fromOffset(36, 32)), "Background")
-    Border(Main)
-    local Label = Text(Main, "Text", Option(Params, "Name", "Atarazia"), UDim2.new(1, -12, 1, 0),
-        UDim2.fromOffset(6, 0), "Accent")
-    Main:MakeDraggable()
-    local Data = { Items = { Watermark = Main, Text = Label }, Prefix = Option(Params, "Name", "Atarazia") }
-    function Data:SetText(Value)
-        self.Provider = nil
-        self.Prefix = tostring(Value)
-        Label.Instance.Text = self.Prefix
-    end
-    Data.SetName = Data.SetText
-    function Data:SetDynamicTextProvider(Callback)
-        self.Provider = Callback
-    end
-    function Data:SetVisibility(Bool)
-        Main.Instance.Visible = Bool == true
-    end
-    function Data:GetBounds()
-        return Main.Instance.AbsolutePosition, Main.Instance.AbsoluteSize
-    end
-    local Frames, Elapsed = 0, 0
-    Library:Connect(RunService.RenderStepped, function(Delta)
-        Frames, Elapsed = Frames + 1, Elapsed + Delta
-        if Elapsed >= 1 then
-            local Fps = math.round(Frames / Elapsed)
-            if Data.Provider then
-                local Success, Value = Library:SafeCall(Data.Provider, Fps)
-                if Success then
-                    Label.Instance.Text = tostring(Value or "")
-                end
-            else
-                Label.Instance.Text = Data.Prefix .. " / " .. Fps .. " fps / " .. os.date("%H:%M:%S")
-            end
-            Frames, Elapsed = 0, 0
-        end
-    end, Main)
-    Library:RegisterLayout("Watermark", { Instance = Main.Instance })
-    return Data
-end
-
-Library.ConsoleLogger = function(Self, Params)
-    Params = Params or {}
-    local Data = Panel(Params, "Console", Vector2.new(420, 275), UDim2.fromScale(0.05857, 0.14878))
-    Data.Items.CallLogger = Data.Items.MainFrame
-    local Output = Scroll(Data.Items.MainFrame, "Prints_ScrollingFrame", UDim2.new(1, -14, 1, -80),
-        UDim2.fromOffset(7, 40), 5)
-    Border(Output)
-    Data.Items.Holder = Output
-    local Clear = Button(Data.Items.MainFrame, "Clear_Button", "Clear Console", UDim2.new(1, -14, 0, 25),
-        UDim2.new(0, 7, 1, -32), "Element")
-    Border(Clear)
-    Data.Items.Clear = Clear
-    Data.CommandCallback = Option(Params, "Callback")
-    Data.Lines = {}
-    Data.MaxLines = math.max(1, tonumber(Option(Params, "MaxLines", 250)) or 250)
-    function Data:Add(TextValue, Color)
-        local Label = Text(Output, "Print_Label", tostring(TextValue), UDim2.new(1, 0, 0, 20))
-        Label.Instance.TextXAlignment = Enum.TextXAlignment.Left
-        Label.Instance.TextWrapped = true
-        Label.Instance.AutomaticSize = Enum.AutomaticSize.Y
-        if Color then
-            Label.Instance.TextColor3 = Color
-        end
-        table.insert(self.Lines, Label)
-        if #self.Lines > self.MaxLines then
-            table.remove(self.Lines, 1):Destroy()
-        end
-        Library:Delay(0, function()
-            if Output.Instance.Parent then
-                Output.Instance.CanvasPosition = Vector2.new(0,
-                    math.max(0, Output.Instance.AbsoluteCanvasSize.Y - Output.Instance.AbsoluteWindowSize.Y))
-            end
-        end)
-        return Label
-    end
-    function Data:AddOutput(Value)
-        return self:Add(Value)
-    end
-    function Data:AddWarning(Value)
-        return self:Add(Value, Color3.fromRGB(255, 222, 80))
-    end
-    function Data:AddError(Value)
-        return self:Add(Value, Library.Theme.Risky)
-    end
-    function Data:Clear()
-        for _, Label in ipairs(self.Lines) do
-            Label:Destroy()
-        end
-        table.clear(self.Lines)
-        Output.Instance.CanvasPosition = Vector2.new(0, 0)
-    end
-    function Data:SetCommandCallback(Callback)
-        self.CommandCallback = Callback
-    end
-    if Option(Params, "CommandInput", false) or Data.CommandCallback then
-        Output.Instance.Size = UDim2.new(1, -14, 1, -110)
-        local Input = Library:Create("TextBox", {
-            Name = "Input", Parent = Data.Items.MainFrame, Size = UDim2.new(1, -14, 0, 23),
-            Position = UDim2.new(0, 7, 1, -61), PlaceholderText = "Command ...", ClearTextOnFocus = false,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }):AddToTheme({ BackgroundColor3 = "Element", PlaceholderColor3 = "Inactive Text" })
-        Border(Input)
-        Data.Items.Input = Input
-        Input:Connect("FocusLost", function(Enter)
-            if Enter and Input.Instance.Text ~= "" then
-                local Value = Input.Instance.Text
-                Input.Instance.Text = ""
-                Library:SafeCall(Data.CommandCallback, Value, Data)
-            end
-        end)
-    end
-    Clear:Connect("Activated", function()
-        Data:Clear()
-    end)
-    if Option(Params, "CaptureLogs", false) then
-        local LogService = game:GetService("LogService")
-        Library:Connect(LogService.MessageOut, function(Value, MessageType)
-            if MessageType == Enum.MessageType.MessageError then
-                Data:AddError(Value)
-            elseif MessageType == Enum.MessageType.MessageWarning then
-                Data:AddWarning(Value)
-            else
-                Data:AddOutput(Value)
-            end
-        end, Data.Items.MainFrame)
-    end
-    AttachPanelButton(Data, "Console")
-    return Data
-end
-Library.Console = Library.ConsoleLogger
-
-Library.LuaWindow = function(Self, Params)
-    Params = Params or {}
-    local Data = Panel(Params, "Lua", Vector2.new(430, 312), UDim2.fromScale(0.65705, 0.46951))
-    Data.Items.LuaWindow = Data.Items.MainFrame
-    Data.Files, Data.Selected, Data.Callback = {}, nil, Option(Params, "Callback")
-    local Toolbar = Frame(Data.Items.MainFrame, "LuaButtons_Frame", UDim2.new(1, -14, 0, 21), UDim2.fromOffset(7, 39))
-    List(Toolbar, 5, true)
-    local File = Button(Toolbar, "File_Button", "File", UDim2.fromOffset(50, 21))
-    local ExecuteButton = Button(Toolbar, "Execute_Button", "Execute", UDim2.fromOffset(60, 21))
-    local Delete = Button(Toolbar, "Delete_Button", "Delete", UDim2.fromOffset(50, 21))
-    Border(File)
-    Border(ExecuteButton)
-    Border(Delete)
-    local Tabs = Library:Create("ScrollingFrame", {
-        Name = "LuaFile_Frame", Parent = Data.Items.MainFrame, Size = UDim2.new(1, -14, 0, 23),
-        Position = UDim2.fromOffset(7, 65), BackgroundTransparency = 1,
-        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X,
-        ScrollingDirection = Enum.ScrollingDirection.X, ScrollBarThickness = 0,
-    })
-    List(Tabs, 5, true)
-    Border(Tabs)
-    local EditorScroll = Library:Create("ScrollingFrame", {
-        Name = "Code_ScrollingFrame", Parent = Data.Items.MainFrame, Size = UDim2.new(1, -14, 1, -104),
-        Position = UDim2.fromOffset(7, 96), BackgroundTransparency = 1, CanvasSize = UDim2.new(),
-        ScrollBarThickness = 2, ScrollingDirection = Enum.ScrollingDirection.XY,
-    })
-    Border(EditorScroll)
-    local Numbers = Text(EditorScroll, "LineNumbers", "1", UDim2.fromOffset(34, 20), UDim2.fromOffset(0, 5), "Inactive Text")
-    Numbers.Instance.FontFace = Font.new("rbxasset://fonts/families/RobotoMono.json")
-    Numbers.Instance.TextYAlignment = Enum.TextYAlignment.Top
-    Numbers.Instance.TextTruncate = Enum.TextTruncate.None
-    local Editor = Library:Create("TextBox", {
-        Name = "Editor", Parent = EditorScroll, Size = UDim2.new(1, -42, 1, -10), Position = UDim2.fromOffset(38, 5),
-        MultiLine = true, ClearTextOnFocus = false, BackgroundTransparency = 1,
-        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-        TextWrapped = false, FontFace = Font.new("rbxasset://fonts/families/RobotoMono.json"),
-        TextSize = 12, TextStrokeTransparency = 1,
-    })
-    Data.Items.Editor, Data.Items.LineNumbers, Data.Items.CodeScroll, Data.Items.Files = Editor, Numbers, EditorScroll, Tabs
-    Data.Items.Execute, Data.Items.Delete, Data.Items.File = ExecuteButton, Delete, File
-    local Changing = false
-    local function UpdateEditorSize()
-        local Source = Editor.Instance.Text
-        local Count = 1
-        for _ in Source:gmatch("\n") do
-            Count = Count + 1
-        end
-        local Lines = {}
-        for Index = 1, Count do
-            Lines[Index] = tostring(Index)
-        end
-        Numbers.Instance.Text = table.concat(Lines, "\n")
-        local Height = math.max(Editor.Instance.TextBounds.Y + 12, EditorScroll.Instance.AbsoluteWindowSize.Y - 10)
-        local Width = math.max(Editor.Instance.TextBounds.X + 14, EditorScroll.Instance.AbsoluteWindowSize.X - 42)
-        Editor.Instance.Size = UDim2.fromOffset(Width, Height)
-        Numbers.Instance.Size = UDim2.fromOffset(34, Height)
-        EditorScroll.Instance.CanvasSize = UDim2.fromOffset(Width + 42, Height + 10)
-    end
-    function Data:AddFile(Name, Source)
-        Name = tostring(Name or "Untitled.lua")
-        if self.Files[Name] then
-            return self.Files[Name]
-        end
-        local Tab = Button(Tabs, "FileName_Button", Name, UDim2.fromOffset(math.max(70, #Name * 7), 23))
-        local Entry = { Name = Name, Source = tostring(Source or ""), Button = Tab }
-        self.Files[Name] = Entry
-        Tab:Connect("Activated", function()
-            Data:SelectFile(Name)
-        end)
-        self:SelectFile(Name)
-        return Entry
-    end
-    function Data:SelectFile(Name)
-        local Entry = self.Files[Name]
-        if not Entry then
-            return false
-        end
-        if self.Selected and self.Files[self.Selected] then
-            self.Files[self.Selected].Source = Editor.Instance.Text
-        end
-        self.Selected = Name
-        Changing = true
-        Editor.Instance.Text = Entry.Source
-        Changing = false
-        for OtherName, Other in pairs(self.Files) do
-            Other.Button:AddToTheme({ TextColor3 = OtherName == Name and "Accent" or "Inactive Text" })
-        end
-        UpdateEditorSize()
-        return true
-    end
-    function Data:SetCode(Source)
-        Editor.Instance.Text = tostring(Source or "")
-        if self.Selected then
-            self.Files[self.Selected].Source = Editor.Instance.Text
-        end
-        UpdateEditorSize()
-    end
-    function Data:GetCode()
-        return Editor.Instance.Text
-    end
-    function Data:DeleteFile(Name)
-        Name = Name or self.Selected
-        local Entry = self.Files[Name]
-        if not Entry then
-            return false
-        end
-        Entry.Button:Destroy()
-        self.Files[Name] = nil
-        if self.Selected == Name then
-            self.Selected = nil
-            local NextName = next(self.Files)
-            if NextName then
-                self:SelectFile(NextName)
-            else
-                self:AddFile("Untitled.lua", "")
-            end
-        end
-        return true
-    end
-    function Data:Execute()
-        -- Intentionally callback-driven; the library never evaluates arbitrary source itself.
-        if type(self.Callback) ~= "function" then
-            Library:Notification("Supply LuaWindow.Callback to handle Execute", 3)
-            return false
-        end
-        return Library:SafeCall(self.Callback, self:GetCode(), self.Selected, self)
-    end
-    Library:Connect(Editor.Instance:GetPropertyChangedSignal("Text"), function()
-        if not Changing and Data.Selected then
-            Data.Files[Data.Selected].Source = Editor.Instance.Text
-        end
-        UpdateEditorSize()
-    end, EditorScroll)
-    Library:Connect(Editor.Instance:GetPropertyChangedSignal("TextBounds"), UpdateEditorSize, EditorScroll)
-    Library:Connect(EditorScroll.Instance:GetPropertyChangedSignal("AbsoluteSize"), UpdateEditorSize, EditorScroll)
-    File:Connect("Activated", function()
-        local Index = 1
-        while Data.Files["Untitled" .. Index .. ".lua"] do
-            Index = Index + 1
-        end
-        Data:AddFile("Untitled" .. Index .. ".lua", "")
-    end)
-    Delete:Connect("Activated", function()
-        Data:DeleteFile()
-    end)
-    ExecuteButton:Connect("Activated", function()
-        Data:Execute()
-    end)
-    Data:AddFile(Option(Params, "FileName", "Example.lua"), Option(Params, "Source", "-- Write Luau here"))
-    AttachPanelButton(Data, "Lua")
-    return Data
-end
-Library.Lua = Library.LuaWindow
-
-Library.ESPPreview = function(Self, Params)
-    Params = Params or {}
-    local Data = Panel(Params, "Esp Preview", Vector2.new(240, 255), UDim2.fromScale(0.65705, 0.14878))
-    Data.Items.ESPPreview = Data.Items.MainFrame
-    local Background = Frame(Data.Items.MainFrame, "Preview_Frame", UDim2.new(1, -14, 1, -50),
-        UDim2.fromOffset(7, 40), "Section")
-    Border(Background)
-    local Viewport = Library:Create("ViewportFrame", {
-        Name = "Viewport", Parent = Background, Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1, Ambient = Color3.fromRGB(200, 200, 200),
-        LightColor = Color3.new(1, 1, 1), LightDirection = Vector3.new(-1, -1, -1),
-    })
-    local World = Library:Create("WorldModel", { Name = "PreviewWorld", Parent = Viewport })
-    local Camera = Library:Create("Camera", { Parent = Viewport, FieldOfView = 35 })
-    Viewport.Instance.CurrentCamera = Camera.Instance
-    Data.Items.Viewport, Data.Items.Background, Data.Items.World = Viewport, Background, World
-    Data.PreviewModel, Data.Player, Data.RebuildVersion = nil, nil, 0
-    function Data:BuildFromModel(Model)
-        if self.PreviewModel then
-            self.PreviewModel:Destroy()
-            self.PreviewModel = nil
-        end
-        self.Player = Model
-        if not Model or not Model:IsA("Model") then
-            return false
-        end
-        local WasArchivable = Model.Archivable
-        local Success, Clone = pcall(function()
-            Model.Archivable = true
-            return Model:Clone()
-        end)
-        Model.Archivable = WasArchivable
-        if not Success or not Clone then
-            return false
-        end
-        for _, Object in ipairs(Clone:GetDescendants()) do
-            if Object:IsA("LuaSourceContainer") then
-                Object:Destroy()
-            elseif Object:IsA("BasePart") then
-                Object.Anchored = true
-                Object.CanCollide = false
-            elseif Object:IsA("Humanoid") then
-                Object.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-            end
-        end
-        Clone.Parent = World.Instance
-        Clone:PivotTo(CFrame.new())
-        local Center, Size = Clone:GetBoundingBox()
-        local Distance = math.max(Size.Y, Size.X) / (2 * math.tan(math.rad(35 / 2))) * 1.3
-        Camera.Instance.CFrame = CFrame.lookAt(Center.Position + Vector3.new(0, 0, -Distance), Center.Position)
-        self.PreviewModel = Clone
-        return true
-    end
-    function Data:SetImage(Image)
-        if not self.Items.Image then
-            self.Items.Image = Library:Create("ImageLabel", {
-                Parent = Background, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-            })
-        end
-        self.Items.Image.Instance.Image = Image
-        self.Items.Image.Instance.Visible = Image ~= ""
-        Viewport.Instance.Visible = Image == ""
-    end
-    local function Rebuild(Character)
-        Data.RebuildVersion = Data.RebuildVersion + 1
-        local Version = Data.RebuildVersion
-        Library:Delay(0.5, function()
-            if Version == Data.RebuildVersion and Data.Instance.Parent then
-                Data:BuildFromModel(Character)
-            end
-        end)
-    end
-    if Option(Params, "UseLocalCharacter", true) then
-        if LocalPlayer.Character then
-            Rebuild(LocalPlayer.Character)
-        end
-        Library:Connect(LocalPlayer.CharacterAdded, Rebuild, Data.Items.MainFrame)
-        Library:Connect(LocalPlayer.CharacterAppearanceLoaded, Rebuild, Data.Items.MainFrame)
-    end
-    AttachPanelButton(Data, "Esp")
-    return Data
-end
-
-Library.Playerlist = function(Self, Params)
-    Params = Params or {}
-    local Data = Panel(Params, "Players", Vector2.new(205, 265), UDim2.fromScale(0.20549, 0.49756))
-    Data.Items.Playerlist = Data.Items.MainFrame
-    Data.Players, Data.Selected, Data.Callback = {}, nil, Option(Params, "Callback")
-    local Search = Library:Create("TextBox", {
-        Name = "Search", Parent = Data.Items.MainFrame, Size = UDim2.new(1, -14, 0, 25),
-        Position = UDim2.fromOffset(7, 37), PlaceholderText = "Search ...", ClearTextOnFocus = false,
-        TextXAlignment = Enum.TextXAlignment.Left,
-    }):AddToTheme({ BackgroundColor3 = "Element", PlaceholderColor3 = "Inactive Text" })
-    Border(Search)
-    local Holder = Scroll(Data.Items.MainFrame, "Players_ScrollingFrame", UDim2.new(1, -14, 1, -138),
-        UDim2.fromOffset(7, 69), 3)
-    Border(Holder)
-    local Avatar = Library:Create("ImageLabel", {
-        Name = "PlayerProfile_Image", Parent = Data.Items.MainFrame, Size = UDim2.fromOffset(54, 54),
-        Position = UDim2.new(0, 7, 1, -61), BackgroundTransparency = 1,
-    })
-    Border(Avatar)
-    local Display = Text(Data.Items.MainFrame, "Display", "No player", UDim2.new(1, -75, 0, 16), UDim2.new(0, 68, 1, -61))
-    Display.Instance.TextXAlignment = Enum.TextXAlignment.Left
-    local Id = Text(Data.Items.MainFrame, "UserId", "UserId | -", UDim2.new(1, -75, 0, 16), UDim2.new(0, 68, 1, -45), "Inactive Text")
-    Id.Instance.TextXAlignment = Enum.TextXAlignment.Left
-    local Change = Button(Data.Items.MainFrame, "ChangeStatus_Button", "Change", UDim2.new(0.5, -38, 0, 18), UDim2.new(0, 68, 1, -25))
-    local Teleport = Button(Data.Items.MainFrame, "Teleport_Button", "Teleport", UDim2.new(0.5, -38, 0, 18), UDim2.new(0.5, 35, 1, -25))
-    Border(Change)
-    Border(Teleport)
-    Data.Items.Holder, Data.Items.Search, Data.Items.Avatar = Holder, Search, Avatar
-    Data.Items.Display, Data.Items.UserID, Data.Items.Change, Data.Items.Teleport = Display, Id, Change, Teleport
-    local function Filter()
-        local Query = Search.Instance.Text:lower()
-        for _, Entry in pairs(Data.Players) do
-            Entry.Items.NewPlayer.Instance.Visible = (Entry.Name .. " " .. Entry.Display):lower():find(Query, 1, true) ~= nil
-        end
-    end
-    function Data:Select(Entry)
-        if type(Entry) == "string" then
-            Entry = self.Players[Entry]
-        end
-        self.Selected = Entry
-        for _, Other in pairs(self.Players) do
-            Other.IsSelected = Other == Entry
-            Other.Items.Username:AddToTheme({ TextColor3 = Other.IsSelected and "Accent" or "Inactive Text" })
-        end
-        Display.Instance.Text = Entry and Entry.Display or "No player"
-        Id.Instance.Text = "UserId | " .. (Entry and tostring(Entry.Player.UserId) or "-")
-        Avatar.Instance.Image = ""
-        if Entry then
-            Library:Thread(function()
-                local Success, Image = pcall(function()
-                    return Players:GetUserThumbnailAsync(Entry.Player.UserId,
-                        Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
-                end)
-                if Success and not Library.Destroyed and Data.Selected == Entry then
-                    Avatar.Instance.Image = Image
-                end
-            end)
-        end
-        Library:SafeCall(self.Callback, Entry)
-    end
-    function Data:Add(Player)
-        if self.Players[Player.Name] then
-            return self.Players[Player.Name]
-        end
-        local Row = Button(Holder, "Player_Frame", "", UDim2.new(1, 0, 0, 20))
-        local Name = Text(Row, "Name_Label", Player.DisplayName or Player.Name, UDim2.new(0.62, 0, 1, 0), nil, "Inactive Text")
-        Name.Instance.TextXAlignment = Enum.TextXAlignment.Left
-        local Status = Text(Row, "Status_Label", "neutral", UDim2.new(0.38, 0, 1, 0), UDim2.fromScale(0.62, 0), "Inactive Text")
-        Status.Instance.TextXAlignment = Enum.TextXAlignment.Right
-        local Entry = {
-            Name = Player.Name, Display = Player.DisplayName or Player.Name, Player = Player,
-            Status = "Neutral", IsSelected = false, Items = { NewPlayer = Row, Username = Name, Status = Status },
-        }
-        function Entry:Set()
-            if Data.Selected == self then
-                Data:Select(nil)
-            else
-                Data:Select(self)
-            end
-        end
-        function Entry:SetStatus(Value)
-            if not table.find({ "Neutral", "Enemy", "Friendly" }, Value) then
-                return false
-            end
-            self.Status = Value
-            Status.Instance.Text = Value:lower()
-            Library:SafeCall(Option(Params, "StatusCallback"), self, Value)
-            return true
-        end
-        Row:Connect("Activated", function()
-            Entry:Set()
-        end)
-        self.Players[Player.Name] = Entry
-        Filter()
-        return Entry
-    end
-    function Data:Remove(Player)
-        local Name = type(Player) == "string" and Player or Player.Name
-        local Entry = self.Players[Name]
-        if Entry then
-            Entry.Items.NewPlayer:Destroy()
-            self.Players[Name] = nil
-            if self.Selected == Entry then
-                self:Select(nil)
-            end
-        end
-    end
-    Change:Connect("Activated", function()
-        if Data.Selected then
-            local Values = { "Neutral", "Enemy", "Friendly" }
-            local Index = table.find(Values, Data.Selected.Status) or 1
-            Data.Selected:SetStatus(Values[Index % #Values + 1])
-        end
-    end)
-    Teleport:Connect("Activated", function()
-        if not Data.Selected then
-            return
-        end
-        local Callback = Option(Params, "TeleportCallback")
-        if Callback then
-            Library:SafeCall(Callback, Data.Selected.Player, Data.Selected)
-        else
-            Library:Notification("Supply Playerlist.TeleportCallback for this action", 3)
-        end
-    end)
-    Library:Connect(Search.Instance:GetPropertyChangedSignal("Text"), Filter, Data.Items.MainFrame)
-    Library:Connect(Players.PlayerAdded, function(Player)
-        Data:Add(Player)
-    end, Data.Items.MainFrame)
-    Library:Connect(Players.PlayerRemoving, function(Player)
-        Data:Remove(Player)
-    end, Data.Items.MainFrame)
-    for _, Player in ipairs(Players:GetPlayers()) do
-        Data:Add(Player)
-    end
-    AttachPanelButton(Data, "Players")
-    return Data
-end
-Library.PlayerList = Library.Playerlist
-
-Library.KeySystem = function(Self, Params)
-    Params = Params or {}
-    local Data = Panel(Params, "Atarazia System", Vector2.new(185, 160), UDim2.fromScale(0.82487, 0.28902))
-    Data.Items.KeyWindow = Data.Items.MainFrame
-    local Content = Frame(Data.Items.MainFrame, "Content", UDim2.new(1, -26, 1, -45), UDim2.fromOffset(13, 39))
-    List(Content, 7)
-    local Settings = setmetatable({ Kind = "Settings", Items = { Content = Content } }, Library)
-    Data.Username = Settings:Textbox({ Name = "Username", Flag = Flag({}, "KeyUsername"), Placeholder = "Username ..." })
-    Data.Key = Settings:Textbox({ Name = "Key", Flag = Flag({}, "KeyInput"), Placeholder = "Key Here ..." })
-    Library.IgnoreFlags[Data.Username.Flag], Library.IgnoreFlags[Data.Key.Flag] = true, true
-    local Actions = Frame(Content, "GetKeys_Frame", UDim2.new(1, 0, 0, 25))
-    local GetKey = Button(Actions, "GetKey_Button", "Get Key", UDim2.new(0.5, -2, 1, 0))
-    local Submit = Button(Actions, "InputKey_Button", "Input Key", UDim2.new(0.5, -2, 1, 0), UDim2.new(0.5, 2, 0, 0))
-    Border(GetKey)
-    Border(Submit)
-    Data.Items.GetKey, Data.Items.Submit = GetKey, Submit
-    local Busy = false
-    function Data:Submit()
-        if Busy then
-            return false
-        end
-        local Validator = Option(Params, "Callback", Option(Params, "Validate"))
-        if not Validator then
-            Library:Notification("Supply KeySystem.Callback to validate the key", 3)
-            return false
-        end
-        Busy = true
-        Submit.Instance.Text = "..."
-        local Success, Accepted, Message = Library:SafeCall(Validator, self.Username.Value, self.Key.Value, self)
-        Busy = false
-        if Library.Destroyed then
-            return false
-        end
-        Submit.Instance.Text = "Input Key"
-        if Success and Accepted == true then
-            self:SetVisibility(false)
-            Library:SafeCall(Option(Params, "SuccessCallback"), self)
-            return true
-        end
-        Library:Notification(tostring(Message or "Key rejected"), 3, Library.Theme.Risky)
-        return false
-    end
-    GetKey:Connect("Activated", function()
-        Library:SafeCall(Option(Params, "GetKeyCallback"), Data)
-    end)
-    Submit:Connect("Activated", function()
-        Data:Submit()
-    end)
-    AttachPanelButton(Data, "Key")
-    return Data
-end
 
 Library.RegisterLayout = function(Self, Id, Data)
     Library.LayoutRegistry[Id] = Data
@@ -2669,10 +2290,12 @@ Library.OpenConfirmDialog = function(Self, Params)
     end
     Library:CloseOpenFrames()
     local Overlay = Button(Library.Root, "ModalOverlay", "", nil, nil, "Border")
+    Overlay.NoPressScale = true
+    Library.ThemeMap[Overlay.Instance] = {}
     Overlay.Instance.ZIndex = 300
     Overlay.Instance.BackgroundTransparency = 0.35
     Overlay.Instance.Modal = true
-    local PanelItem = Frame(Overlay, "ConfirmDialog", UDim2.fromOffset(284, 130), UDim2.fromScale(0.5, 0.5), "Background")
+    local PanelItem = Group(Overlay, "ConfirmDialog", UDim2.fromOffset(284, 130), UDim2.fromScale(0.5, 0.5), "Background")
     PanelItem.Instance.AnchorPoint = Vector2.new(0.5, 0.5)
     Border(PanelItem)
     local Title = Text(PanelItem, "Title", Option(Params, "Title", "Confirm"), UDim2.new(1, -20, 0, 20),
@@ -2696,7 +2319,10 @@ Library.OpenConfirmDialog = function(Self, Params)
         end
         self.Closed = true
         Library.ActiveConfirmDialog = nil
-        Overlay:Destroy()
+        PanelItem:AnimatedVisibility(false)
+        Overlay:Tween({ BackgroundTransparency = 1 })
+        pcall(function() Overlay.Instance.Interactable = false end)
+        Library:Delay(Library.Animation.Time, function() Overlay:Destroy() end)
         if not SkipCallback then
             Library:SafeCall(Option(Params, "Callback"), Accepted == true)
         end
@@ -2713,11 +2339,9 @@ Library.OpenConfirmDialog = function(Self, Params)
         end
     end)
     Library.ActiveConfirmDialog = Data
+    PanelItem.Instance.Visible = false
+    PanelItem:AnimatedVisibility(true)
     return Data
-end
-
-Library.RegisterSettingsWidget = function(Self, Data)
-    table.insert(Library.SettingsWidgets, Data)
 end
 
 Library.CreateSettingsPage = function(Self)
@@ -2791,15 +2415,6 @@ Library.CreateSettingsPage = function(Self)
     Settings:Button({ Name = "Unload", Callback = function()
         Library:Exit()
     end })
-    if #Library.SettingsWidgets > 0 then
-        local Widgets = Other:Section({ Name = "Widgets", Side = 2 })
-        for _, Widget in ipairs(Library.SettingsWidgets) do
-            local Toggle = Widgets:Toggle(Widget)
-            if Widget.Settings then
-                Library:SafeCall(Widget.Settings, Toggle:Settings(), Toggle)
-            end
-        end
-    end
     return Page
 end
 
